@@ -1,28 +1,21 @@
 /**
  * @file  main.cpp
- * @brief ARES runtime bootstrap (quiet mode).
+ * @brief ARES runtime bootstrap.
  *
  * Initialises subsystems (sensors, radio, storage, WiFi, API, AMS)
  * and then remains idle until external commands arrive through the
  * REST API / mission runtime.
  *
+ * Board-specific driver instantiation is delegated to the active
+ * board implementation in src/boards/.  Select a board by defining
+ * BOARD_ARES_V1 or BOARD_MYBOARD in platformio.ini build_flags.
+ *
  * All objects are statically allocated (no `new`) so heap
  * usage stays at zero (PO10-3).
  */
 
+#include "boards/board.h"
 #include "config.h"
-#include "hal/baro/barometer_interface.h"
-#include "hal/gps/gps_interface.h"
-#include "hal/imu/imu_interface.h"
-#include "hal/led/led_interface.h"
-#include "hal/radio/radio_interface.h"
-#include "drivers/baro/bmp280_driver.h"
-#include "drivers/gps/bn220_driver.h"
-#include "drivers/imu/mpu6050_driver.h"
-#include "drivers/imu/adxl375_driver.h"
-#include "drivers/radio/dxlr03_driver.h"
-#include "drivers/pulse/pulse_driver.h"
-#include "sys/led/neopixel_driver.h"
 #include "sys/led/status_led.h"
 #include "sys/wifi/wifi_ap.h"
 #include "sys/storage/littlefs_storage.h"
@@ -33,115 +26,72 @@
 
 #include <Arduino.h>
 #include <freertos/task.h>
-#include <Wire.h>
 #include <esp_system.h>
 
 #include "debug/ares_log.h"
 
-// ── Peripherals (static allocation, no heap) ───────────────
-// Concrete drivers are created here and exposed below as
-// interface references.  This is the only place in the
-// codebase that knows which sensor hardware is installed.
-static HardwareSerial gpsSerial(ares::GPS_UART_PORT);
-static HardwareSerial loraSerial(ares::LORA_UART_PORT);
-static TwoWire        imuWire(1);
-static Bmp280Driver   baro(Wire, ares::BMP280_I2C_ADDR);
-static Bn220Driver    gps(gpsSerial, ares::PIN_GPS_RX,
-                          ares::PIN_GPS_TX, ares::GPS_BAUD);
-static DxLr03Driver   radio(loraSerial, ares::PIN_LORA_TX,
-                             ares::PIN_LORA_RX, ares::PIN_LORA_AUX,
-                             ares::LORA_UART_BAUD);
-static Mpu6050Driver  imu(imuWire, ares::MPU6050_I2C_ADDR);
-static Adxl375Driver  imu2(imuWire, ares::ADXL375_I2C_ADDR);
-static NeopixelDriver led(ares::PIN_LED_RGB);
-static StatusLed      statusLed(led);
-static PulseDriver    pulse(ares::PIN_DROGUE, ares::PIN_MAIN);
-
-// WiFi Access Point (sys layer) — ground configuration link.
-static WifiAp wifiAp;
-
-// On-board flash filesystem for flight logs.
+// ── Application-layer singletons (not board-specific) ──────────
+// WifiAp and LittleFsStorage are SoC-level, not tied to board hardware.
+static WifiAp          wifiAp;
 static LittleFsStorage storage;
 
-// Interface references — all downstream code uses these.
-static LedInterface&       ledIf     = led;
-static StorageInterface&   storageIf = storage;
-static RadioInterface&     radioIf   = radio;
-// Driver registries — enumerate every physical peripheral available to AMS scripts.
-// Scripts select which driver to use via: include MODEL as ALIAS
-static BarometerInterface* const  kBaroIfaces[]   = { &baro };
-static GpsInterface* const        kGpsIfaces[]    = { &gps  };
-static const ares::ams::GpsEntry  kGpsDrivers[]   = { { "BN220",  kGpsIfaces[0]  } };
-static const ares::ams::BaroEntry kBaroDrivers[]  = { { "BMP280", kBaroIfaces[0] } };
-static const ares::ams::ComEntry  kComDrivers[]   = { { "DXLR03", &radioIf } };
-static ImuInterface* const        kImuIfaces[]    = { &imu, &imu2 };
-static const ares::ams::ImuEntry  kImuDrivers[]   = { { "MPU6050", kImuIfaces[0] },
-                                                       { "ADXL375", kImuIfaces[1] } };
-
-// REST API server — receives references to interfaces.
-static ares::ams::MissionScriptEngine missionEngine(
-    storageIf,
-    kGpsDrivers,  static_cast<uint8_t>(1),
-    kBaroDrivers, static_cast<uint8_t>(1),
-    kComDrivers,  static_cast<uint8_t>(1),
-    kImuDrivers,  static_cast<uint8_t>(2),
-    &pulse);
-static ApiServer apiServer(wifiAp, *kBaroIfaces[0], *kGpsIfaces[0], *kImuIfaces[0],
-                           &storageIf, &missionEngine,
-                           &statusLed,
-                           &Wire, &imuWire,
-                           &gpsSerial, &loraSerial,
-                           &radioIf,
-                           &pulse);
-
-// Radio dispatcher — polls the LoRa receive FIFO and dispatches inbound APUS
-// frames (APUS-4.4).  Sends acceptance ACK / NACK for every COMMAND (APUS-9).
-static ares::RadioDispatcher radioDispatcher(radioIf, missionEngine, &pulse);
+// ── File-scope pointers for loop() access ──────────────────────
+// These are set once in setup() and remain valid for the lifetime of
+// the program.  Static locals in setup() live in .bss, not the stack.
+static ares::ams::MissionScriptEngine* gEngine     = nullptr;
+static ApiServer*                      gApi        = nullptr;
+static ares::RadioDispatcher*          gDispatch   = nullptr;
 
 // ═══════════════════════════════════════════════════════════
 void setup()
 {
-    // Keep USB serial available for on-demand diagnostics, but do not
-    // emit boot banners or periodic traces in normal operation.
     Serial.begin(ares::SERIAL_BAUD);
 
-    // I2C buses — initialise before any I2C driver.
-    // I2C0 (Wire): shared board sensors (BMP280 on GPIO 1/2).
-    Wire.begin(ares::PIN_I2C_SDA, ares::PIN_I2C_SCL, ares::I2C_FREQ);
-    Wire.setTimeOut(ares::I2C_TIMEOUT_MS);
-    // I2C1: dedicated IMU bus (MPU6050 on GPIO 12/13).
-    // Uses 100 kHz standard mode — GY-521 pull-ups (10 kΩ) are not reliable at 400 kHz.
-    imuWire.begin(ares::PIN_IMU_SDA, ares::PIN_IMU_SCL, ares::I2C_FREQ_IMU);
-    imuWire.setTimeOut(ares::I2C_TIMEOUT_MS);
+    ares::board::initBuses();
+    ares::board::beginAll();
+    auto& b = ares::board::get();
 
-    for (BarometerInterface* iface : kBaroIfaces) { (void)iface->begin(); }
-    for (ImuInterface*        iface : kImuIfaces)  { (void)iface->begin(); }
-    for (GpsInterface*        iface : kGpsIfaces)  { (void)iface->begin(); }
-    (void)pulse.begin();
-
-    // Status LED — NeoPixel on GPIO 21
-    (void)ledIf.begin();
-    ledIf.setBrightness(ares::DEFAULT_LED_BRIGHTNESS);
-    statusLed.begin();  // starts RTOS task — solid green (IDLE)
-
-    // On-board flash storage (LittleFS)
+    StorageInterface& storageIf = storage;
     (void)storageIf.begin();
 
-    // LoRa radio transceiver (UART2)
-    (void)radioIf.begin();
+    // LoRa radio transceiver
+    // (radio hardware begin() is called by board::beginAll(); here we
+    //  just reference the interface for application-layer objects.)
 
     // WiFi AP — must be up before API server
     (void)wifiAp.begin();
 
     // AMS runtime (IDLE by default, waits for API activation)
-    (void)missionEngine.begin();
+    // static: one-time construction in .bss, not on the stack.
+    static ares::ams::MissionScriptEngine engine(
+        storageIf,
+        b.gpsDrivers,  b.gpsCount,
+        b.baroDrivers, b.baroCount,
+        b.comDrivers,  b.comCount,
+        b.imuDrivers,  b.imuCount,
+        b.pulse,
+        b.servo);
+    gEngine = &engine;
+    (void)engine.begin();
 
-    // REST API server — start after AMS is ready to avoid init race
+    // REST API server
+    static ApiServer apiServer(wifiAp,
+                               *b.primaryBaro, *b.primaryGps, *b.primaryImu,
+                               &storageIf, gEngine,
+                               b.statusLed,
+                               b.wire0, b.wire1,
+                               b.gpsSerial, b.radioSerial,
+                               b.radio,
+                               b.pulse);
+    gApi = &apiServer;
     (void)apiServer.begin();
 
+    // Radio dispatcher — polls the LoRa receive FIFO and dispatches
+    // inbound APUS frames.  Sends ACK/NACK for every COMMAND (APUS-9).
+    static ares::RadioDispatcher radioDispatcher(*b.radio, engine, b.pulse);
+    gDispatch = &radioDispatcher;
+
     // Classify the reset cause before acting on the restored checkpoint.
-    // Abnormal causes (panic, WDT, brownout) while in-flight trigger TC.RESET_ABNORMAL
-    // so the user's AMS script can decide how to respond (e.g. deploy parachute).
     const esp_reset_reason_t resetCause = esp_reset_reason();
     const bool abnormalReset =
         (resetCause == ESP_RST_PANIC    ||
@@ -150,25 +100,21 @@ void setup()
          resetCause == ESP_RST_WDT      ||
          resetCause == ESP_RST_BROWNOUT);
 
-    // If AMS restored an in-flight checkpoint after reboot, reflect it in API mode.
     ares::ams::EngineSnapshot bootSnap = {};
-    missionEngine.getSnapshot(bootSnap);
+    engine.getSnapshot(bootSnap);
     if (bootSnap.status == ares::ams::EngineStatus::RUNNING)
     {
         if (abnormalReset)
         {
-            // In-flight + abnormal reset: inject TC so the script handles recovery.
-            // The TC is consumed on the first tick — zero latency penalty.
             LOG_W("BOOT", "Abnormal reset during flight (cause=%d) — injecting TC.RESET_ABNORMAL",
                   static_cast<int>(resetCause));
-            (void)missionEngine.injectTcCommand("RESET_ABNORMAL");
+            (void)engine.injectTcCommand("RESET_ABNORMAL");
         }
         apiServer.notifyMissionResumed();
     }
     else
     {
-        // All subsystems ready — exit boot blink, go solid green (IDLE)
-        statusLed.setMode(ares::OperatingMode::IDLE);
+        if (b.statusLed) { b.statusLed->setMode(ares::OperatingMode::IDLE); }
     }
 }
 
@@ -176,36 +122,33 @@ void setup()
 void loop()
 {
     const uint32_t now = millis();
+    auto& b = ares::board::get();
 
     // GPS bytes must be consumed every iteration to keep
     // the UART FIFO from overflowing (72-byte HW FIFO).
-    for (GpsInterface* iface : kGpsIfaces) { iface->update(); }
+    for (uint8_t i = 0; i < b.gpsCount; ++i) { b.gpsDrivers[i].iface->update(); }
 
     // Radio receive path — poll LoRa FIFO, decode APUS frames, dispatch
     // commands, and send ACK/NACK responses (APUS-4.4, APUS-9, APUS-14).
-    // Must run before missionEngine.tick() so that injected TC commands
-    // (ABORT, LAUNCH, RESET) are visible to the state machine this cycle.
-    radioDispatcher.poll(now);
+    gDispatch->poll(now);
 
     // AMS script runtime tick (state machine + PUS emission).
-    missionEngine.tick(now);
+    gEngine->tick(now);
 
     // Auto-return to IDLE when the AMS mission finishes or faults.
-    // Only act once per transition: check that we are currently in FLIGHT.
-    if (apiServer.getMode() == ares::OperatingMode::FLIGHT)
+    if (gApi->getMode() == ares::OperatingMode::FLIGHT)
     {
         ares::ams::EngineSnapshot snap = {};
-        missionEngine.getSnapshot(snap);
+        gEngine->getSnapshot(snap);
         if (snap.status == ares::ams::EngineStatus::COMPLETE
             || snap.status == ares::ams::EngineStatus::ERROR)
         {
-            apiServer.notifyMissionComplete();
+            gApi->notifyMissionComplete();
         }
     }
 
     // Adaptive sleep: wake up exactly when the next engine event is due.
-    // Falls back to SENSOR_RATE_MS for states with active conditions.
-    const uint32_t wakeupMs = missionEngine.nextWakeupMs(now);
+    const uint32_t wakeupMs = gEngine->nextWakeupMs(now);
     const uint32_t sleepMs  = (wakeupMs > now) ? (wakeupMs - now) : 1U;
     vTaskDelay(pdMS_TO_TICKS(sleepMs));
 }

@@ -22,6 +22,7 @@
 #include "hal/gps/gps_interface.h"
 #include "hal/imu/imu_interface.h"
 #include "hal/radio/radio_interface.h"
+#include "hal/servo/servo_interface.h"
 
 namespace ares
 {
@@ -39,6 +40,9 @@ struct ComEntry  { const char* model; RadioInterface*     iface; };
 
 /** One compiled-in IMU driver entry (iface may be null if hardware not wired). */
 struct ImuEntry  { const char* model; ImuInterface*       iface; };
+
+/** One compiled-in servo driver entry. */
+struct ServoEntry { const char* model; ServoInterface*    iface; };
 
 } // namespace ams
 } // namespace ares

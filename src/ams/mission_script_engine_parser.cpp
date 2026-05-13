@@ -732,7 +732,8 @@ bool MissionScriptEngine::parseStateBlockContentLocked(const char* line, // NOLI
         if (startsWith(line, evtPrefix)) { return parseEventLineLocked(line, st); }
         if (startsWith(line, "set ")) { return parseSetActionLineLocked(line, st); }
         if (startsWith(line, "PULSE.fire ")) { return parsePulseFireLineLocked(line, st); }  // AMS-4.17
-        setErrorLocked("only EVENT.*, set and PULSE.fire are allowed inside on_enter");
+        if (startsWith(line, "SERVO.set "))  { return parseServoSetLineLocked(line, st);  }
+        setErrorLocked("only EVENT.*, set, PULSE.fire and SERVO.set are allowed inside on_enter");
         return false;
     }
     if (blockType == BlockType::ON_EXIT)
@@ -2869,6 +2870,92 @@ bool MissionScriptEngine::parsePulseDurationSuffixLocked(const char* afterCh,
         return false;
     }
 
+    return true;
+}
+
+// ── parseServoSetLineLocked ───────────────────────────────────────────────────
+
+/**
+ * @brief Parse a @c SERVO.set directive inside an @c on_enter: block.
+ *
+ * Syntax:
+ * @code
+ *   SERVO.set 90          -- set servo to 90 degrees
+ *   SERVO.set 0
+ *   SERVO.set 180
+ *   SERVO.set 1500us      -- set servo via raw pulse width (µs)
+ * @endcode
+ *
+ * @param[in]  line  Script line starting with @c "SERVO.set ".
+ * @param[out] st    State definition to append the action to.
+ * @return @c true if the directive was parsed and stored.
+ * @pre  Caller holds the engine mutex.
+ */
+bool MissionScriptEngine::parseServoSetLineLocked(const char* line,
+                                                  StateDef&   st)
+{
+    ARES_ASSERT(line != nullptr);
+
+    if (st.servoActionCount >= ares::AMS_MAX_SERVO_ACTIONS)
+    {
+        setErrorLocked("too many SERVO.set actions in on_enter block");
+        return false;
+    }
+
+    // Skip "SERVO.set " prefix (10 characters).
+    static constexpr uint8_t kPrefixLen = 10U;
+    const char* rest = line + kPrefixLen;
+
+    if (*rest == '\0')
+    {
+        setErrorLocked("SERVO.set: missing value");
+        return false;
+    }
+
+    StateDef::ServoAction act = {};
+
+    // Check for raw microseconds form: "Nus" (e.g. "1500us").
+    const char* usPtr = strstr(rest, "us");
+    if (usPtr != nullptr && usPtr != rest)
+    {
+        // Parse the numeric part before "us".
+        const ptrdiff_t numLen = usPtr - rest;
+        if (numLen <= 0 || numLen >= 8)
+        {
+            setErrorLocked("SERVO.set: us value out of range");
+            return false;
+        }
+        char numBuf[8] = {};
+        strncpy(numBuf, rest, static_cast<size_t>(numLen));
+        uint32_t us = 0U;
+        if (!parseUint(numBuf, us) || us < 500U || us > 2500U)
+        {
+            setErrorLocked("SERVO.set: pulse width must be 500–2500 us");
+            return false;
+        }
+        if (!isOnlyTrailingWhitespace(usPtr + 2U))
+        {
+            setErrorLocked("SERVO.set: unexpected suffix after us value");
+            return false;
+        }
+        act.rawUs    = static_cast<uint16_t>(us);
+        act.angleDeg = 0U;
+    }
+    else
+    {
+        // Degrees form: "N" (0–180).
+        uint32_t deg = 0U;
+        if (!parseUint(rest, deg) || deg > 180U)
+        {
+            setErrorLocked("SERVO.set: angle must be 0–180 degrees");
+            return false;
+        }
+        act.angleDeg = static_cast<uint8_t>(deg);
+        act.rawUs    = 0U;
+    }
+
+    st.servoActions[st.servoActionCount] = act;
+    st.servoActionCount++;
     return true;
 }
 

@@ -109,13 +109,17 @@ public:
      * @param[in] pulseIface  Optional electric-pulse channel interface.
      *                        Pass @c nullptr to disable PULSE.fire execution
      *                        (e.g. in SITL tests without a pulse driver).
+     * @param[in] servoIface  Optional servo interface.
+     *                        Pass @c nullptr to disable SERVO.set execution
+     *                        (e.g. boards without a servo actuator).
      */
     MissionScriptEngine(StorageInterface&  storage,
                         const GpsEntry*    gpsDrivers,  uint8_t gpsCount,
                         const BaroEntry*   baroDrivers, uint8_t baroCount,
                         const ComEntry*    comDrivers,  uint8_t comCount,
                         const ImuEntry*    imuDrivers,  uint8_t imuCount,
-                        PulseInterface*    pulseIface = nullptr);
+                        PulseInterface*    pulseIface  = nullptr,
+                        ServoInterface*    servoIface  = nullptr);
 
     MissionScriptEngine(const MissionScriptEngine&)            = delete;
     MissionScriptEngine& operator=(const MissionScriptEngine&) = delete;
@@ -653,6 +657,16 @@ private:
         uint8_t      pulseActionCount = 0U;
         PulseAction  pulseActions[ares::AMS_MAX_PULSE_ACTIONS] = {};
 
+        // ── on_enter servo set actions ────────────────────────
+        /// A single SERVO.set command parsed from an on_enter: block.
+        struct ServoAction
+        {
+            uint8_t  angleDeg;    ///< Target angle in degrees [0, 180].
+            uint16_t rawUs;       ///< Raw pulse width µs override; 0 = use angleDeg.
+        };
+        uint8_t      servoActionCount = 0U;
+        ServoAction  servoActions[ares::AMS_MAX_SERVO_ACTIONS] = {};
+
         // ── on_exit handler (AMS-4.9) ────────────────────────
         // Executed synchronously when leaving this state via any transition
         // (normal, fallback, or error-recovery). Does NOT fire on deactivate()
@@ -806,6 +820,7 @@ private:
     bool parseSetActionLineLocked(const char* line, StateDef& st);
     bool parsePulseFireLineLocked(const char* line, StateDef& st);            ///< AMS-4.17: parse "PULSE.fire A[/B] [Nms]".
     bool parsePulseDurationSuffixLocked(const char* afterCh, uint32_t& out); ///< Parse optional " Nms" suffix; called by parsePulseFireLineLocked.
+    bool parseServoSetLineLocked(const char* line, StateDef& st);            ///< Parse "SERVO.set <degrees>" or "SERVO.set <N>us".
     bool parseSetActionCoreLocked(const char* line, SetAction& out);  ///< Shared core; called by state + task parsers.
     bool ensureSetVariableExistsLocked(const char* varName);
     bool parseCalibrateSetActionLocked(const char* rhsBuf, SetAction& out);
@@ -911,6 +926,7 @@ private:
     void sendOnEnterEventLocked(uint32_t nowMs);
     void executeSetActionsLocked(StateDef& st, uint32_t nowMs);
     void executePulseActionsLocked(const StateDef& st);  ///< AMS-4.17: fire all PULSE.fire actions for state entry.
+    void executeServoActionsLocked(const StateDef& st);  ///< Execute all SERVO.set actions for state entry.
     void executeOneSetActionLocked(SetAction& act, uint32_t nowMs); ///< Execute a single set action (shared by state + task paths).
     void executeCalibrateSetActionLocked(SetAction& act, float& result, bool& gotReading, uint32_t nowMs);
     void executeDeltaSetActionLocked(SetAction& act, float& result, bool& gotReading);
@@ -1055,6 +1071,7 @@ private:
     uint8_t              imuCount_;
     RadioInterface*      primaryCom_ = nullptr; ///< Active COM driver for frame TX.
     PulseInterface*      pulseIface_ = nullptr;  ///< Nullable — pulse disabled if null (AMS-4.17).
+    ServoInterface*      servoIface_ = nullptr;  ///< Nullable — servo disabled if null.
 
     StaticSemaphore_t mutexBuf_ = {};
     SemaphoreHandle_t mutex_ = nullptr;

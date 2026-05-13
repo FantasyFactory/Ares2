@@ -137,6 +137,7 @@ constexpr uint8_t     AMS_MAX_ASSERTS            = 8U;  ///< Max assert directiv
 constexpr uint8_t     AMS_VAR_NAME_LEN         = 16U;///< Max variable name length including NUL (AMS-4.8).
 constexpr uint8_t     AMS_MAX_SET_ACTIONS      = 4U; ///< Max set actions per on_enter block (AMS-4.8).
 constexpr uint8_t     AMS_MAX_PULSE_ACTIONS    = 2U; ///< Max PULSE.fire actions per on_enter block (AMS-4.17).
+constexpr uint8_t     AMS_MAX_SERVO_ACTIONS    = 2U; ///< Max SERVO.set actions per on_enter block.
 constexpr uint8_t     AMS_MAX_SENSOR_RETRY     = 5U; ///< Max sensor read retries declared in include (AMS-4.9.1).
 constexpr uint8_t     AMS_MAX_ERROR_TEXT   = 96;           ///< Max internal parser/runtime error text.
 constexpr uint16_t    AMS_MAX_LINE_LEN     = 128;          ///< Parser line buffer size.

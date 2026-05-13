@@ -86,13 +86,15 @@ MissionScriptEngine::MissionScriptEngine(StorageInterface&  storage,
                                          const BaroEntry*   baroDrivers, uint8_t baroCount,
                                          const ComEntry*    comDrivers,  uint8_t comCount,
                                          const ImuEntry*    imuDrivers,  uint8_t imuCount,
-                                         PulseInterface*    pulseIface)
+                                         PulseInterface*    pulseIface,
+                                         ServoInterface*    servoIface)
     : storage_(storage),
       gpsDrivers_(gpsDrivers),   gpsCount_(gpsCount),
       baroDrivers_(baroDrivers), baroCount_(baroCount),
       comDrivers_(comDrivers),   comCount_(comCount),
       imuDrivers_(imuDrivers),   imuCount_(imuCount),
-      pulseIface_(pulseIface)
+      pulseIface_(pulseIface),
+      servoIface_(servoIface)
 {
 }
 
@@ -2153,6 +2155,12 @@ void MissionScriptEngine::sendOnEnterEventLocked(uint32_t nowMs)
         executePulseActionsLocked(st);
     }
 
+    // Execute servo position commands declared in on_enter: block.
+    if (st.servoActionCount > 0U)
+    {
+        executeServoActionsLocked(st);
+    }
+
     if (!st.hasOnEnterEvent)
     {
         return;
@@ -2203,6 +2211,46 @@ void MissionScriptEngine::executePulseActionsLocked(const StateDef& st)
             LOG_E(TAG, "PULSE ch=%u fire failed",
                   static_cast<uint32_t>(act.channel));
             setErrorLocked("PULSE.fire: driver rejected fire command");
+        }
+    }
+}
+
+/**
+ * @brief Execute all SERVO.set actions declared in a state's on_enter: block.
+ *
+ * Safety gate: only fires when the engine is RUNNING and execution is enabled.
+ * If servoIface_ is null (no servo hardware on this board) the call is silently skipped.
+ *
+ * @param[in] st  State definition containing servoActions[].
+ * @pre  mutex_ is held by the caller.
+ */
+void MissionScriptEngine::executeServoActionsLocked(const StateDef& st)
+{
+    if (servoIface_ == nullptr
+        || !executionEnabled_
+        || status_ != EngineStatus::RUNNING)
+    {
+        return;
+    }
+
+    for (uint8_t i = 0U; i < st.servoActionCount; i++)
+    {
+        const StateDef::ServoAction& act = st.servoActions[i];
+        bool ok = false;
+        if (act.rawUs > 0U)
+        {
+            ok = servoIface_->setMicroseconds(act.rawUs);
+            LOG_I(TAG, "SERVO set %u us", static_cast<uint32_t>(act.rawUs));
+        }
+        else
+        {
+            ok = servoIface_->setAngle(act.angleDeg);
+            LOG_I(TAG, "SERVO set %u deg", static_cast<uint32_t>(act.angleDeg));
+        }
+        if (!ok)
+        {
+            LOG_E(TAG, "SERVO set failed");
+            setErrorLocked("SERVO.set: driver rejected command");
         }
     }
 }

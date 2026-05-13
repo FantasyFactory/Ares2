@@ -47,6 +47,19 @@ struct ImuReading
 };
 
 /**
+ * A single magnetometer measurement.
+ * Populated only when ImuInterface::hasMagnetometer() and
+ * ImuInterface::isMagnetometerEnabled() both return true.
+ * All fields default-initialised to zero (MISRA-4).
+ */
+struct MagReading
+{
+    float mx = 0.0f;   ///< Body-frame X-axis magnetic field in µT.
+    float my = 0.0f;   ///< Body-frame Y-axis magnetic field in µT.
+    float mz = 0.0f;   ///< Body-frame Z-axis magnetic field in µT.
+};
+
+/**
  * Abstract IMU interface.
  *
  * Concrete drivers implement this interface.  Application code
@@ -79,4 +92,30 @@ public:
      * @return Null-terminated model name string (static storage).
      */
     virtual const char* driverModel() const = 0;
+
+    // ── Optional magnetometer (default: not present) ──────────────────
+    // Drivers without a magnetometer do not override these methods.
+    // Callers must check hasMagnetometer() before using readMag().
+
+    /** @return true if this driver has an integrated magnetometer. */
+    virtual bool hasMagnetometer() const { return false; }
+
+    /** @return true if the magnetometer is currently enabled. */
+    virtual bool isMagnetometerEnabled() const { return false; }
+
+    /**
+     * Enable or disable the integrated magnetometer.
+     * Has no effect (returns false) on drivers without one.
+     * May be called before or after begin().
+     * @return true if the state was applied, false if unsupported.
+     */
+    virtual bool setMagnetometerEnabled(bool en) { (void)en; return false; }
+
+    /**
+     * Read the latest magnetometer sample.
+     * @param[out] out  Populated on ImuStatus::OK.
+     * @return ImuStatus::OK on success, ImuStatus::ERROR if unavailable.
+     * @pre hasMagnetometer() && isMagnetometerEnabled()
+     */
+    virtual ImuStatus readMag(MagReading& out) { (void)out; return ImuStatus::ERROR; }
 };

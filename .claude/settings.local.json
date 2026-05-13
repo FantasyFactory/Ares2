@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git restore *)",
+      "Bash(git checkout *)",
+      "Bash(git fetch *)",
+      "Bash(git merge *)",
+      "Bash(git stash *)",
+      "PowerShell($env:PATH = \"$env:USERPROFILE\\\\scoop\\\\apps\\\\mingw\\\\current\\\\bin;\" + $env:PATH; cd \"c:\\\\Users\\\\ccaso\\\\OneDrive - CGM Consulting S.r.l\\\\Documenti\\\\GitHub\\\\Ares2\"; & \"$env:USERPROFILE\\\\.platformio\\\\penv\\\\Scripts\\\\pio.exe\" run -e esp32-s3-devkitc-1 -e myboard 2>&1 | Select-Object -Last 15)",
+      "PowerShell($env:PATH = \"$env:USERPROFILE\\\\scoop\\\\apps\\\\mingw\\\\current\\\\bin;\" + $env:PATH; cd \"c:\\\\Users\\\\ccaso\\\\OneDrive - CGM Consulting S.r.l\\\\Documenti\\\\GitHub\\\\Ares2\"; & \"$env:USERPROFILE\\\\.platformio\\\\penv\\\\Scripts\\\\pio.exe\" test -e native -e sim 2>&1 | Select-Object -Last 20)"
+    ]
+  }
+}
